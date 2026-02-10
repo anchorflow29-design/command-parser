@@ -8,7 +8,7 @@ ERRORS = {
     "FORMAT": ("INVALID_FORMAT", "Invalid command format"),
     "COMMAND": ("UNKNOWN_COMMAND", "Unknown command"),
     "ITEM": ("INVALID_ITEM", "Invalid item name"),
-    "QUANTITY": ("INVALID_QUANTITY", "Quantity must be a positive integer"),
+    "QUANTITY": ("INVALID_QUANTITY", "Quantity must be a positive number"),
 }
 
 def error(key):
@@ -54,3 +54,4 @@ class CommandInput(BaseModel):
 @app.post("/parse")
 def parse_command(payload: CommandInput):
     return handle(payload.text)
+
