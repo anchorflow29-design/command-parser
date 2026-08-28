@@ -90,28 +90,18 @@ class CommandInput(BaseModel):
 
 @app.post("/parse")
 def parse_command(payload: CommandInput):
-
     return handle(payload.text)
 
 
 # ============================================================
-# WHATSAPP EMBEDDED SIGNUP
+# META HELPERS
 # ============================================================
-
-class WhatsAppSignupRequest(BaseModel):
-    code: str
-
 
 async def meta_get(
     url: str,
     params: dict,
     access_token: str
 ):
-    """
-    Make a GET request to Meta Graph API.
-
-    The access token is only used server-side.
-    """
 
     headers = {
         "Authorization": f"Bearer {access_token}"
@@ -133,10 +123,14 @@ async def meta_get(
 
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to contact Meta: {str(exc)}"
+            detail={
+                "message": "Failed to contact Meta.",
+                "error": str(exc)
+            }
         )
 
     try:
+
         data = response.json()
 
     except Exception:
@@ -150,7 +144,15 @@ async def meta_get(
 
 
 # ============================================================
-# EMBEDDED SIGNUP AUTHORIZATION
+# WHATSAPP EMBEDDED SIGNUP REQUEST
+# ============================================================
+
+class WhatsAppSignupRequest(BaseModel):
+    code: str
+
+
+# ============================================================
+# WHATSAPP EMBEDDED SIGNUP
 # ============================================================
 
 @app.post("/whatsapp/signup")
@@ -171,9 +173,13 @@ async def whatsapp_signup(
         "v25.0"
     )
 
+    business_id = os.getenv(
+        "META_BUSINESS_ID"
+    )
+
 
     # --------------------------------------------------------
-    # VALIDATE SERVER CONFIGURATION
+    # VALIDATE CONFIGURATION
     # --------------------------------------------------------
 
     if not app_id:
@@ -190,6 +196,13 @@ async def whatsapp_signup(
             detail="META_APP_SECRET is not configured."
         )
 
+    if not business_id:
+
+        raise HTTPException(
+            status_code=500,
+            detail="META_BUSINESS_ID is not configured."
+        )
+
     if not payload.code:
 
         raise HTTPException(
@@ -198,10 +211,10 @@ async def whatsapp_signup(
         )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # STEP 1
-    # EXCHANGE EMBEDDED SIGNUP CODE FOR ACCESS TOKEN
-    # --------------------------------------------------------
+    # EXCHANGE AUTHORIZATION CODE
+    # ========================================================
 
     token_url = (
         f"https://graph.facebook.com/"
@@ -235,7 +248,10 @@ async def whatsapp_signup(
         raise HTTPException(
             status_code=502,
             detail={
-                "message": "Could not contact Meta.",
+                "message":
+                    "Could not contact Meta during "
+                    "authorization exchange.",
+
                 "error": str(exc)
             }
         )
@@ -249,20 +265,15 @@ async def whatsapp_signup(
 
         raise HTTPException(
             status_code=502,
-            detail="Meta returned an invalid token response."
+            detail=
+                "Meta returned an invalid authorization response."
         )
 
-
-    # --------------------------------------------------------
-    # META REJECTED THE CODE
-    # --------------------------------------------------------
 
     if token_response.status_code != 200:
 
         raise HTTPException(
-
             status_code=400,
-
             detail={
                 "message":
                     "Meta rejected the Embedded Signup "
@@ -274,10 +285,6 @@ async def whatsapp_signup(
         )
 
 
-    # --------------------------------------------------------
-    # EXTRACT ACCESS TOKEN
-    # --------------------------------------------------------
-
     business_token = token_data.get(
         "access_token"
     )
@@ -286,35 +293,16 @@ async def whatsapp_signup(
     if not business_token:
 
         raise HTTPException(
-
             status_code=502,
-
             detail=
                 "Meta did not return an access token."
         )
 
 
-    # --------------------------------------------------------
-    # IMPORTANT SECURITY RULE
-    # --------------------------------------------------------
-    #
-    # NEVER return business_token to the browser.
-    #
-    # We keep it server-side.
-    #
-    # --------------------------------------------------------
-
-
-    # --------------------------------------------------------
+    # ========================================================
     # STEP 2
     # DEBUG THE TOKEN
-    # --------------------------------------------------------
-    #
-    # Meta's Embedded Signup documentation uses
-    # /debug_token after signup to inspect the
-    # returned token and its granted scopes.
-    #
-    # --------------------------------------------------------
+    # ========================================================
 
     debug_url = (
         f"https://graph.facebook.com/"
@@ -322,30 +310,21 @@ async def whatsapp_signup(
     )
 
     debug_params = {
-
-        "input_token":
-            business_token
-
+        "input_token": business_token
     }
 
 
     debug_response, debug_data = await meta_get(
-
         debug_url,
-
         debug_params,
-
         business_token
-
     )
 
 
     if debug_response.status_code != 200:
 
         raise HTTPException(
-
             status_code=400,
-
             detail={
                 "message":
                     "Meta returned an error while "
@@ -363,16 +342,10 @@ async def whatsapp_signup(
     )
 
 
-    # --------------------------------------------------------
-    # CHECK TOKEN VALIDITY
-    # --------------------------------------------------------
-
     if token_info.get("is_valid") is not True:
 
         raise HTTPException(
-
             status_code=400,
-
             detail={
                 "message":
                     "The authorization token returned "
@@ -385,7 +358,7 @@ async def whatsapp_signup(
 
 
     # --------------------------------------------------------
-    # EXTRACT SAFE INFORMATION
+    # Extract safe token information
     # --------------------------------------------------------
 
     scopes = token_info.get(
@@ -393,56 +366,256 @@ async def whatsapp_signup(
         []
     )
 
-    user_id = token_info.get(
+    meta_user_id = token_info.get(
         "user_id"
     )
 
 
+    # ========================================================
+    # STEP 3
+    # DISCOVER SHARED WABAs
+    # ========================================================
+    #
+    # Meta's Embedded Signup documentation uses:
+    #
+    # /{Business-ID}/client_whatsapp_business_accounts
+    #
+    # to retrieve WABAs assigned/shared with the
+    # Tech Provider's Business Manager after signup.
+    #
+    # The system-user token is used for this operation.
+    #
+    # ========================================================
+
+    shared_wabas_url = (
+        f"https://graph.facebook.com/"
+        f"{graph_version}/"
+        f"{business_id}/"
+        f"client_whatsapp_business_accounts"
+    )
+
+
+    shared_wabas_response, shared_wabas_data = await meta_get(
+
+        shared_wabas_url,
+
+        {},
+
+        business_token
+
+    )
+
+
     # --------------------------------------------------------
-    # SUCCESS
+    # Handle Meta error
     # --------------------------------------------------------
-    #
-    # For now we STOP here.
-    #
-    # We do NOT yet query the customer's WABA because
-    # we need the appropriate business context from
-    # the completed onboarding.
-    #
-    # Session 3 will handle:
-    #
-    #   Shared WABA discovery
-    #   ↓
-    #   WABA ID
-    #   ↓
-    #   Phone numbers
-    #
+
+    if shared_wabas_response.status_code != 200:
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail={
+                "message":
+                    "Authorization succeeded, but Meta "
+                    "did not allow AnchorFlow to retrieve "
+                    "shared WABAs.",
+
+                "meta_response":
+                    shared_wabas_data
+            }
+        )
+
+
     # --------------------------------------------------------
+    # Extract WABAs
+    # --------------------------------------------------------
+
+    wabas = shared_wabas_data.get(
+        "data",
+        []
+    )
+
+
+    # ========================================================
+    # IMPORTANT
+    # ========================================================
+    #
+    # It is possible to have:
+    #
+    #   - zero WABAs
+    #   - one WABA
+    #   - multiple WABAs
+    #
+    # We should NOT blindly select the first WABA.
+    #
+    # For now we return the discovered WABAs.
+    #
+    # In the production onboarding system, we'll correlate
+    # the newly onboarded client with the correct WABA.
+    #
+    # ========================================================
+
+
+    safe_wabas = []
+
+    for waba in wabas:
+
+        safe_wabas.append({
+
+            "id":
+                waba.get("id"),
+
+            "name":
+                waba.get("name"),
+
+            "currency":
+                waba.get("currency"),
+
+            "timezone_id":
+                waba.get("timezone_id"),
+
+            "message_template_namespace":
+                waba.get(
+                    "message_template_namespace"
+                )
+
+        })
+
+
+    # ========================================================
+    # STEP 4
+    # GET PHONE NUMBERS
+    # ========================================================
+    #
+    # We only query phone numbers when exactly one WABA
+    # has been discovered.
+    #
+    # This avoids accidentally selecting the wrong WABA
+    # when multiple client WABAs exist.
+    #
+    # ========================================================
+
+    phone_numbers = []
+
+    selected_waba_id = None
+
+
+    if len(safe_wabas) == 1:
+
+        selected_waba_id = safe_wabas[0]["id"]
+
+        phone_numbers_url = (
+            f"https://graph.facebook.com/"
+            f"{graph_version}/"
+            f"{selected_waba_id}/"
+            f"phone_numbers"
+        )
+
+
+        phone_response, phone_data = await meta_get(
+
+            phone_numbers_url,
+
+            {},
+
+            business_token
+
+        )
+
+
+        if phone_response.status_code != 200:
+
+            raise HTTPException(
+
+                status_code=400,
+
+                detail={
+                    "message":
+                        "WABA was discovered, but Meta "
+                        "did not allow AnchorFlow to "
+                        "retrieve its phone numbers.",
+
+                    "waba_id":
+                        selected_waba_id,
+
+                    "meta_response":
+                        phone_data
+                }
+            )
+
+
+        phone_numbers = phone_data.get(
+            "data",
+            []
+        )
+
+
+    # ========================================================
+    # LOG SAFE INFORMATION
+    # ========================================================
 
     print(
         "Meta Embedded Signup authorization successful."
     )
 
     print(
-        f"Meta user ID: {user_id}"
+        f"Meta user ID: {meta_user_id}"
     )
 
     print(
         f"Granted scopes: {scopes}"
     )
 
+    print(
+        f"Discovered WABAs: {len(safe_wabas)}"
+    )
+
+    if selected_waba_id:
+
+        print(
+            f"Selected WABA ID: {selected_waba_id}"
+        )
+
+        print(
+            f"Phone numbers found: "
+            f"{len(phone_numbers)}"
+        )
+
+
+    # ========================================================
+    # RETURN SAFE RESPONSE
+    # ========================================================
+    #
+    # NEVER return the access token.
+    #
+    # ========================================================
 
     return {
 
         "ok": True,
 
         "message":
-            "Meta Embedded Signup authorization "
-            "was successfully exchanged and validated.",
+            "Embedded Signup authorization succeeded "
+            "and WABA discovery completed.",
 
         "meta_user_id":
-            user_id,
+            meta_user_id,
 
         "scopes":
-            scopes
+            scopes,
+
+        "waba_count":
+            len(safe_wabas),
+
+        "wabas":
+            safe_wabas,
+
+        "selected_waba_id":
+            selected_waba_id,
+
+        "phone_numbers":
+            phone_numbers
 
     }
