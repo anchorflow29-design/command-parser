@@ -619,3 +619,152 @@ async def whatsapp_signup(
             phone_numbers
 
     }
+# ============================================================
+# SESSION 4 - TEST WABA ACCESS
+# ============================================================
+
+@app.get("/whatsapp/test-assets")
+async def test_whatsapp_assets():
+
+    system_user_token = os.getenv("META_SYSTEM_USER_TOKEN")
+    graph_version = os.getenv("META_GRAPH_VERSION", "v25.0")
+
+    waba_id = "2328538700984791"
+    phone_number_id = "1000053203193157"
+    business_id = os.getenv("META_BUSINESS_ID")
+
+    if not system_user_token:
+        raise HTTPException(
+            status_code=500,
+            detail="META_SYSTEM_USER_TOKEN is not configured."
+        )
+
+    if not business_id:
+        raise HTTPException(
+            status_code=500,
+            detail="META_BUSINESS_ID is not configured."
+        )
+
+    headers = {
+        "Authorization": f"Bearer {system_user_token}"
+    }
+
+    results = {}
+
+    try:
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+
+            # ------------------------------------------------
+            # 1. Get WABA details
+            # ------------------------------------------------
+
+            waba_response = await client.get(
+                f"https://graph.facebook.com/"
+                f"{graph_version}/{waba_id}",
+                params={
+                    "fields": "id,name,currency,timezone_id"
+                },
+                headers=headers
+            )
+
+            results["waba"] = {
+                "status_code": waba_response.status_code,
+                "response": waba_response.json()
+            }
+
+
+            # ------------------------------------------------
+            # 2. Get phone numbers belonging to WABA
+            # ------------------------------------------------
+
+            phones_response = await client.get(
+                f"https://graph.facebook.com/"
+                f"{graph_version}/{waba_id}/phone_numbers",
+                headers=headers
+            )
+
+            results["phone_numbers"] = {
+                "status_code": phones_response.status_code,
+                "response": phones_response.json()
+            }
+
+
+            # ------------------------------------------------
+            # 3. Verify assigned users
+            # ------------------------------------------------
+
+            assigned_users_response = await client.get(
+                f"https://graph.facebook.com/"
+                f"{graph_version}/{waba_id}/assigned_users",
+                params={
+                    "business": business_id
+                },
+                headers=headers
+            )
+
+            results["assigned_users"] = {
+                "status_code":
+                    assigned_users_response.status_code,
+
+                "response":
+                    assigned_users_response.json()
+            }
+
+
+            # ------------------------------------------------
+            # 4. Get specific phone number details
+            # ------------------------------------------------
+
+            phone_response = await client.get(
+                f"https://graph.facebook.com/"
+                f"{graph_version}/{phone_number_id}",
+                params={
+                    "fields":
+                        "id,display_phone_number,"
+                        "verified_name,quality_rating,"
+                        "code_verification_status"
+                },
+                headers=headers
+            )
+
+            results["specific_phone"] = {
+                "status_code": phone_response.status_code,
+                "response": phone_response.json()
+            }
+
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message":
+                    "Failed to communicate with Meta.",
+
+                "error":
+                    str(exc)
+            }
+        )
+
+
+    return {
+        "ok": True,
+        "message":
+            "Session 4 WABA access test completed.",
+
+        "business_id":
+            business_id,
+
+        "system_user_id":
+            "61593436147926",
+
+        "waba_id":
+            waba_id,
+
+        "phone_number_id":
+            phone_number_id,
+
+        "results":
+            results
+    }
