@@ -768,3 +768,234 @@ async def test_whatsapp_assets():
         "results":
             results
     }
+    # ============================================================
+# SESSION 4 - DYNAMIC WABA DISCOVERY
+# ============================================================
+
+@app.post("/whatsapp/discover")
+async def discover_whatsapp_waba(payload: WhatsAppSignupRequest):
+
+    app_id = os.getenv("META_APP_ID")
+    app_secret = os.getenv("META_APP_SECRET")
+    system_user_token = os.getenv("META_SYSTEM_USER_TOKEN")
+    business_id = os.getenv("META_BUSINESS_ID")
+
+    if not app_id:
+        raise HTTPException(
+            status_code=500,
+            detail="META_APP_ID is not configured."
+        )
+
+    if not app_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="META_APP_SECRET is not configured."
+        )
+
+    if not system_user_token:
+        raise HTTPException(
+            status_code=500,
+            detail="META_SYSTEM_USER_TOKEN is not configured."
+        )
+
+    if not business_id:
+        raise HTTPException(
+            status_code=500,
+            detail="META_BUSINESS_ID is not configured."
+        )
+
+    graph_version = os.getenv(
+        "META_GRAPH_VERSION",
+        "v25.0"
+    )
+
+    graph_base = (
+        f"https://graph.facebook.com/"
+        f"{graph_version}"
+    )
+
+    try:
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+
+            # ====================================================
+            # STEP 1
+            # Exchange Embedded Signup authorization code
+            # for OAuth access token
+            # ====================================================
+
+            token_response = await client.get(
+                f"{graph_base}/oauth/access_token",
+                params={
+                    "client_id": app_id,
+                    "client_secret": app_secret,
+                    "code": payload.code,
+                }
+            )
+
+            token_data = token_response.json()
+
+            if token_response.status_code != 200:
+
+                raise HTTPException(
+                    status_code=token_response.status_code,
+                    detail={
+                        "message":
+                            "Meta rejected the authorization code.",
+                        "meta_response":
+                            token_data
+                    }
+                )
+
+            oauth_access_token = token_data.get(
+                "access_token"
+            )
+
+            if not oauth_access_token:
+
+                raise HTTPException(
+                    status_code=502,
+                    detail=
+                        "Meta did not return an access token."
+                )
+
+
+            # ====================================================
+            # STEP 2
+            # Debug the OAuth token
+            #
+            # We use the System User token to inspect it.
+            # ====================================================
+
+            debug_response = await client.get(
+                f"{graph_base}/debug_token",
+                params={
+                    "input_token":
+                        oauth_access_token
+                },
+                headers={
+                    "Authorization":
+                        f"Bearer {system_user_token}"
+                }
+            )
+
+            debug_data = debug_response.json()
+
+            if debug_response.status_code != 200:
+
+                raise HTTPException(
+                    status_code=debug_response.status_code,
+                    detail={
+                        "message":
+                            "Meta could not debug the "
+                            "Embedded Signup token.",
+                        "meta_response":
+                            debug_data
+                    }
+                )
+
+            token_info = debug_data.get(
+                "data",
+                {}
+            )
+
+            if not token_info.get("is_valid"):
+
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message":
+                            "The Embedded Signup token "
+                            "is not valid.",
+                        "token_info":
+                            token_info
+                    }
+                )
+
+
+            # ====================================================
+            # STEP 3
+            # Fetch WABAs shared with AnchorFlow
+            #
+            # IMPORTANT:
+            # This is dynamic. No WABA ID is hardcoded.
+            # ====================================================
+
+            waba_response = await client.get(
+                f"{graph_base}/"
+                f"{business_id}/"
+                f"client_whatsapp_business_accounts",
+                headers={
+                    "Authorization":
+                        f"Bearer {system_user_token}"
+                }
+            )
+
+            waba_data = waba_response.json()
+
+            if waba_response.status_code not in (
+                200,
+                201
+            ):
+
+                raise HTTPException(
+                    status_code=waba_response.status_code,
+                    detail={
+                        "message":
+                            "Meta could not retrieve "
+                            "shared WABAs.",
+                        "meta_response":
+                            waba_data
+                    }
+                )
+
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message":
+                    "Failed to communicate with Meta.",
+                "error":
+                    str(exc)
+            }
+        )
+
+
+    # ============================================================
+    # IMPORTANT SECURITY RULE
+    #
+    # Never return oauth_access_token to the browser.
+    # ============================================================
+
+    return {
+        "ok": True,
+
+        "message":
+            "Embedded Signup token validated and "
+            "shared WABAs retrieved.",
+
+        "token": {
+            "is_valid":
+                token_info.get("is_valid"),
+
+            "app_id":
+                token_info.get("app_id"),
+
+            "user_id":
+                token_info.get("user_id"),
+
+            "scopes":
+                token_info.get("scopes"),
+
+            "expires_at":
+                token_info.get("expires_at")
+        },
+
+        "wabas":
+            waba_data.get("data", [])
+    }
