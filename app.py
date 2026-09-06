@@ -369,7 +369,7 @@ async def whatsapp_signup(
             detail={
                 "message":
                     "Authorization succeeded, but Meta "
-                    "did not allow AnchorFlow to retrieve "
+                    "did not allow Anchorflow to retrieve "
                     "shared WABAs.",
 
                 "meta_response":
@@ -444,7 +444,7 @@ async def whatsapp_signup(
                 detail={
                     "message":
                         "WABA was discovered, but Meta "
-                        "did not allow AnchorFlow to "
+                        "did not allow Anchorflow to "
                         "retrieve its phone numbers.",
 
                     "waba_id":
@@ -875,7 +875,7 @@ async def discover_whatsapp_waba(
 
             # ====================================================
             # STEP 3
-            # Fetch WABAs shared with AnchorFlow
+            # Fetch WABAs shared with Anchorflow
             # ====================================================
 
             waba_response = await client.get(
@@ -975,7 +975,8 @@ class WABASubscriptionRequest(BaseModel):
 
 
 # ============================================================
-# SESSION 5 - CHECK WABA SUBSCRIPTION
+# SESSION 5
+# CHECK WABA SUBSCRIPTION
 # ============================================================
 
 @app.get("/whatsapp/subscription-status")
@@ -1076,7 +1077,8 @@ async def whatsapp_subscription_status():
 
 
 # ============================================================
-# SESSION 5 - SUBSCRIBE ANCHORFLOW TO WABA
+# SESSION 5
+# SUBSCRIBE ANCHORFLOW TO WABA
 # ============================================================
 
 @app.post("/whatsapp/subscribe")
@@ -1093,11 +1095,22 @@ async def whatsapp_subscribe(
         "v25.0"
     )
 
+    app_id = os.getenv(
+        "META_APP_ID"
+    )
+
     if not system_user_token:
 
         raise HTTPException(
             status_code=500,
             detail="META_SYSTEM_USER_TOKEN is not configured."
+        )
+
+    if not app_id:
+
+        raise HTTPException(
+            status_code=500,
+            detail="META_APP_ID is not configured."
         )
 
     if not payload.waba_id:
@@ -1108,7 +1121,7 @@ async def whatsapp_subscribe(
         )
 
     # --------------------------------------------------------
-    # Basic validation
+    # Basic WABA ID validation
     # --------------------------------------------------------
 
     if not payload.waba_id.isdigit():
@@ -1182,19 +1195,25 @@ async def whatsapp_subscribe(
 
             # =================================================
             # STEP 2
-            # Detect whether our app is already subscribed
+            # Detect whether Anchorflow is already subscribed
+            #
+            # IMPORTANT:
+            # Meta returns the App ID inside:
+            #
+            # whatsapp_business_api_data.id
             # =================================================
-
-            app_id = os.getenv(
-                "META_APP_ID"
-            )
 
             already_subscribed = False
 
             for app in current_apps:
 
+                app_data = app.get(
+                    "whatsapp_business_api_data",
+                    {}
+                )
+
                 if str(
-                    app.get("id")
+                    app_data.get("id")
                 ) == str(app_id):
 
                     already_subscribed = True
@@ -1203,7 +1222,7 @@ async def whatsapp_subscribe(
 
             # =================================================
             # STEP 3
-            # If already subscribed, do nothing
+            # Already subscribed
             # =================================================
 
             if already_subscribed:
@@ -1215,8 +1234,11 @@ async def whatsapp_subscribe(
                     "already_subscribed":
                         True,
 
+                    "verified":
+                        True,
+
                     "message":
-                        "AnchorFlow is already subscribed "
+                        "Anchorflow is already subscribed "
                         "to this WABA.",
 
                     "waba_id":
@@ -1228,7 +1250,7 @@ async def whatsapp_subscribe(
 
             # =================================================
             # STEP 4
-            # Subscribe AnchorFlow
+            # Subscribe Anchorflow
             # =================================================
 
             subscribe_response = await client.post(
@@ -1330,7 +1352,7 @@ async def whatsapp_subscribe(
         )
 
     # ============================================================
-    # FINAL RESULT
+    # FINAL VERIFICATION
     # ============================================================
 
     final_apps = verify_data.get(
@@ -1342,8 +1364,13 @@ async def whatsapp_subscribe(
 
     for app in final_apps:
 
+        app_data = app.get(
+            "whatsapp_business_api_data",
+            {}
+        )
+
         if str(
-            app.get("id")
+            app_data.get("id")
         ) == str(app_id):
 
             verified = True
