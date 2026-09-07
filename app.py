@@ -144,6 +144,378 @@ async def meta_get(
 
 
 # ============================================================
+# SESSION 5
+# REUSABLE WABA SUBSCRIPTION FUNCTION
+# ============================================================
+
+async def subscribe_waba(
+    waba_id: str,
+    system_user_token: str,
+    app_id: str,
+    graph_version: str
+):
+    """
+    Ensure Anchorflow is subscribed to a WABA.
+
+    This function:
+    1. Checks the existing subscriptions.
+    2. Detects Anchorflow using the nested Meta response.
+    3. If already subscribed, does nothing.
+    4. Otherwise sends POST /subscribed_apps.
+    5. Verifies the resulting subscription.
+
+    It is intentionally reusable by multiple endpoints.
+    """
+
+    url = (
+        f"https://graph.facebook.com/"
+        f"{graph_version}/"
+        f"{waba_id}/"
+        f"subscribed_apps"
+    )
+
+    headers = {
+        "Authorization":
+            f"Bearer {system_user_token}"
+    }
+
+    try:
+
+        async with httpx.AsyncClient(
+            timeout=30.0
+        ) as client:
+
+            # =================================================
+            # STEP 1
+            # Check current subscriptions
+            # =================================================
+
+            status_response = await client.get(
+                url,
+                headers=headers
+            )
+
+            try:
+
+                status_data = status_response.json()
+
+            except Exception:
+
+                raise HTTPException(
+                    status_code=502,
+                    detail=
+                        "Meta returned an invalid "
+                        "subscription status response."
+                )
+
+            if status_response.status_code != 200:
+
+                raise HTTPException(
+                    status_code=
+                        status_response.status_code,
+
+                    detail={
+                        "message":
+                            "Meta rejected the WABA "
+                            "subscription status request.",
+
+                        "waba_id":
+                            waba_id,
+
+                        "meta_response":
+                            status_data
+                    }
+                )
+
+            current_apps = status_data.get(
+                "data",
+                []
+            )
+
+            # =================================================
+            # STEP 2
+            # Check for Anchorflow
+            # =================================================
+
+            already_subscribed = False
+
+            for app in current_apps:
+
+                app_data = app.get(
+                    "whatsapp_business_api_data",
+                    {}
+                )
+
+                if str(
+                    app_data.get("id")
+                ) == str(app_id):
+
+                    already_subscribed = True
+                    break
+
+            # =================================================
+            # STEP 3
+            # Already subscribed
+            # =================================================
+
+            if already_subscribed:
+
+                return {
+                    "subscribed": True,
+                    "already_subscribed": True,
+                    "verified": True,
+                    "subscription_request": None,
+                    "subscribed_apps": current_apps
+                }
+
+            # =================================================
+            # STEP 4
+            # Subscribe Anchorflow
+            # =================================================
+
+            subscribe_response = await client.post(
+                url,
+                headers=headers
+            )
+
+            try:
+
+                subscribe_data = (
+                    subscribe_response.json()
+                )
+
+            except Exception:
+
+                raise HTTPException(
+                    status_code=502,
+                    detail=
+                        "Meta returned an invalid "
+                        "subscription response."
+                )
+
+            if subscribe_response.status_code not in (
+                200,
+                201
+            ):
+
+                raise HTTPException(
+                    status_code=
+                        subscribe_response.status_code,
+
+                    detail={
+                        "message":
+                            "Meta rejected the WABA "
+                            "subscription request.",
+
+                        "waba_id":
+                            waba_id,
+
+                        "meta_response":
+                            subscribe_data
+                    }
+                )
+
+            # =================================================
+            # STEP 5
+            # Verify
+            # =================================================
+
+            verify_response = await client.get(
+                url,
+                headers=headers
+            )
+
+            try:
+
+                verify_data = verify_response.json()
+
+            except Exception:
+
+                raise HTTPException(
+                    status_code=502,
+                    detail=
+                        "Meta returned an invalid "
+                        "verification response."
+                )
+
+            if verify_response.status_code != 200:
+
+                raise HTTPException(
+                    status_code=
+                        verify_response.status_code,
+
+                    detail={
+                        "message":
+                            "Subscription request succeeded, "
+                            "but verification failed.",
+
+                        "waba_id":
+                            waba_id,
+
+                        "meta_response":
+                            verify_data
+                    }
+                )
+
+            final_apps = verify_data.get(
+                "data",
+                []
+            )
+
+            verified = False
+
+            for app in final_apps:
+
+                app_data = app.get(
+                    "whatsapp_business_api_data",
+                    {}
+                )
+
+                if str(
+                    app_data.get("id")
+                ) == str(app_id):
+
+                    verified = True
+                    break
+
+            return {
+                "subscribed": verified,
+                "already_subscribed": False,
+                "verified": verified,
+                "subscription_request": subscribe_data,
+                "subscribed_apps": final_apps
+            }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message":
+                    "Failed to communicate with Meta "
+                    "during WABA subscription.",
+
+                "error":
+                    str(exc)
+            }
+        )
+
+
+# ============================================================
+# SESSION 5
+# READ WABA SUBSCRIPTION STATUS
+# ============================================================
+
+async def get_waba_subscription_status(
+    waba_id: str,
+    system_user_token: str,
+    app_id: str,
+    graph_version: str
+):
+    """
+    Read-only subscription check.
+
+    This is deliberately separate from subscribe_waba()
+    because discovery should not automatically subscribe
+    an ambiguous WABA yet.
+    """
+
+    url = (
+        f"https://graph.facebook.com/"
+        f"{graph_version}/"
+        f"{waba_id}/"
+        f"subscribed_apps"
+    )
+
+    headers = {
+        "Authorization":
+            f"Bearer {system_user_token}"
+    }
+
+    try:
+
+        async with httpx.AsyncClient(
+            timeout=30.0
+        ) as client:
+
+            response = await client.get(
+                url,
+                headers=headers
+            )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message":
+                    "Failed to contact Meta.",
+
+                "error":
+                    str(exc)
+            }
+        )
+
+    try:
+
+        data = response.json()
+
+    except Exception:
+
+        raise HTTPException(
+            status_code=502,
+            detail=
+                "Meta returned an invalid subscription response."
+        )
+
+    if response.status_code != 200:
+
+        raise HTTPException(
+            status_code=response.status_code,
+            detail={
+                "message":
+                    "Meta rejected the WABA subscription "
+                    "status request.",
+
+                "waba_id":
+                    waba_id,
+
+                "meta_response":
+                    data
+            }
+        )
+
+    subscribed_apps = data.get(
+        "data",
+        []
+    )
+
+    subscribed = False
+
+    for app in subscribed_apps:
+
+        app_data = app.get(
+            "whatsapp_business_api_data",
+            {}
+        )
+
+        if str(
+            app_data.get("id")
+        ) == str(app_id):
+
+            subscribed = True
+            break
+
+    return {
+        "subscribed": subscribed,
+        "subscribed_apps": subscribed_apps
+    }
+
+
+# ============================================================
 # WHATSAPP EMBEDDED SIGNUP REQUEST
 # ============================================================
 
@@ -171,10 +543,6 @@ async def whatsapp_signup(
     business_id = os.getenv(
         "META_BUSINESS_ID"
     )
-
-    # --------------------------------------------------------
-    # VALIDATE CONFIGURATION
-    # --------------------------------------------------------
 
     if not app_id:
 
@@ -240,7 +608,8 @@ async def whatsapp_signup(
                     "Could not contact Meta during "
                     "authorization exchange.",
 
-                "error": str(exc)
+                "error":
+                    str(exc)
             }
         )
 
@@ -284,7 +653,7 @@ async def whatsapp_signup(
 
     # ========================================================
     # STEP 2
-    # DEBUG THE TOKEN
+    # DEBUG TOKEN
     # ========================================================
 
     debug_url = (
@@ -292,13 +661,12 @@ async def whatsapp_signup(
         f"{graph_version}/debug_token"
     )
 
-    debug_params = {
-        "input_token": business_token
-    }
-
     debug_response, debug_data = await meta_get(
         debug_url,
-        debug_params,
+        {
+            "input_token":
+                business_token
+        },
         business_token
     )
 
@@ -321,7 +689,9 @@ async def whatsapp_signup(
         {}
     )
 
-    if token_info.get("is_valid") is not True:
+    if token_info.get(
+        "is_valid"
+    ) is not True:
 
         raise HTTPException(
             status_code=400,
@@ -420,6 +790,15 @@ async def whatsapp_signup(
 
     selected_waba_id = None
 
+    # We retain the existing behavior of only selecting a WABA
+    # when exactly one is discovered.
+    #
+    # IMPORTANT:
+    # We do NOT automatically subscribe here yet.
+    # We only inspect the subscription status.
+
+    subscription = None
+
     if len(safe_wabas) == 1:
 
         selected_waba_id = safe_wabas[0]["id"]
@@ -460,6 +839,23 @@ async def whatsapp_signup(
             []
         )
 
+        # ----------------------------------------------------
+        # Read-only subscription status
+        # ----------------------------------------------------
+
+        system_user_token = os.getenv(
+            "META_SYSTEM_USER_TOKEN"
+        )
+
+        if system_user_token:
+
+            subscription = await get_waba_subscription_status(
+                selected_waba_id,
+                system_user_token,
+                app_id,
+                graph_version
+            )
+
     # ========================================================
     # LOG SAFE INFORMATION
     # ========================================================
@@ -491,6 +887,13 @@ async def whatsapp_signup(
             f"{len(phone_numbers)}"
         )
 
+        if subscription:
+
+            print(
+                "Anchorflow WABA subscription status: "
+                f"{subscription.get('subscribed')}"
+            )
+
     # ========================================================
     # RETURN SAFE RESPONSE
     # ========================================================
@@ -519,7 +922,10 @@ async def whatsapp_signup(
             selected_waba_id,
 
         "phone_numbers":
-            phone_numbers
+            phone_numbers,
+
+        "subscription":
+            subscription
     }
 
 
@@ -967,16 +1373,7 @@ async def discover_whatsapp_waba(
 
 # ============================================================
 # SESSION 5
-# WABA SUBSCRIPTION REQUEST
-# ============================================================
-
-class WABASubscriptionRequest(BaseModel):
-    waba_id: str
-
-
-# ============================================================
-# SESSION 5
-# CHECK WABA SUBSCRIPTION
+# TEST WABA SUBSCRIPTION STATUS
 # ============================================================
 
 @app.get("/whatsapp/subscription-status")
@@ -991,8 +1388,11 @@ async def whatsapp_subscription_status():
         "v25.0"
     )
 
-    # Existing test WABA
     waba_id = "2328538700984791"
+
+    app_id = os.getenv(
+        "META_APP_ID"
+    )
 
     if not system_user_token:
 
@@ -1001,65 +1401,19 @@ async def whatsapp_subscription_status():
             detail="META_SYSTEM_USER_TOKEN is not configured."
         )
 
-    url = (
-        f"https://graph.facebook.com/"
-        f"{graph_version}/"
-        f"{waba_id}/"
-        f"subscribed_apps"
+    if not app_id:
+
+        raise HTTPException(
+            status_code=500,
+            detail="META_APP_ID is not configured."
+        )
+
+    result = await get_waba_subscription_status(
+        waba_id,
+        system_user_token,
+        app_id,
+        graph_version
     )
-
-    try:
-
-        async with httpx.AsyncClient(
-            timeout=30.0
-        ) as client:
-
-            response = await client.get(
-                url,
-                headers={
-                    "Authorization":
-                        f"Bearer {system_user_token}"
-                }
-            )
-
-    except Exception as exc:
-
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "message":
-                    "Failed to contact Meta.",
-
-                "error":
-                    str(exc)
-            }
-        )
-
-    try:
-
-        data = response.json()
-
-    except Exception:
-
-        raise HTTPException(
-            status_code=502,
-            detail=
-                "Meta returned an invalid response."
-        )
-
-    if response.status_code != 200:
-
-        raise HTTPException(
-            status_code=response.status_code,
-            detail={
-                "message":
-                    "Meta rejected the WABA subscription "
-                    "status request.",
-
-                "meta_response":
-                    data
-            }
-        )
 
     return {
 
@@ -1068,18 +1422,22 @@ async def whatsapp_subscription_status():
         "waba_id":
             waba_id,
 
+        "subscribed":
+            result["subscribed"],
+
         "subscribed_apps":
-            data.get(
-                "data",
-                []
-            )
+            result["subscribed_apps"]
     }
 
 
 # ============================================================
 # SESSION 5
-# SUBSCRIBE ANCHORFLOW TO WABA
+# MANUAL WABA SUBSCRIPTION
 # ============================================================
+
+class WABASubscriptionRequest(BaseModel):
+    waba_id: str
+
 
 @app.post("/whatsapp/subscribe")
 async def whatsapp_subscribe(
@@ -1120,10 +1478,6 @@ async def whatsapp_subscribe(
             detail="WABA ID is required."
         )
 
-    # --------------------------------------------------------
-    # Basic WABA ID validation
-    # --------------------------------------------------------
-
     if not payload.waba_id.isdigit():
 
         raise HTTPException(
@@ -1131,269 +1485,30 @@ async def whatsapp_subscribe(
             detail="WABA ID must contain only digits."
         )
 
-    url = (
-        f"https://graph.facebook.com/"
-        f"{graph_version}/"
-        f"{payload.waba_id}/"
-        f"subscribed_apps"
+    result = await subscribe_waba(
+        payload.waba_id,
+        system_user_token,
+        app_id,
+        graph_version
     )
-
-    headers = {
-        "Authorization":
-            f"Bearer {system_user_token}"
-    }
-
-    try:
-
-        async with httpx.AsyncClient(
-            timeout=30.0
-        ) as client:
-
-            # =================================================
-            # STEP 1
-            # Check current subscription
-            # =================================================
-
-            status_response = await client.get(
-                url,
-                headers=headers
-            )
-
-            try:
-
-                status_data = status_response.json()
-
-            except Exception:
-
-                raise HTTPException(
-                    status_code=502,
-                    detail=
-                        "Meta returned an invalid "
-                        "subscription status response."
-                )
-
-            if status_response.status_code != 200:
-
-                raise HTTPException(
-                    status_code=
-                        status_response.status_code,
-
-                    detail={
-                        "message":
-                            "Meta rejected the subscription "
-                            "status request.",
-
-                        "meta_response":
-                            status_data
-                    }
-                )
-
-            current_apps = status_data.get(
-                "data",
-                []
-            )
-
-            # =================================================
-            # STEP 2
-            # Detect whether Anchorflow is already subscribed
-            #
-            # IMPORTANT:
-            # Meta returns the App ID inside:
-            #
-            # whatsapp_business_api_data.id
-            # =================================================
-
-            already_subscribed = False
-
-            for app in current_apps:
-
-                app_data = app.get(
-                    "whatsapp_business_api_data",
-                    {}
-                )
-
-                if str(
-                    app_data.get("id")
-                ) == str(app_id):
-
-                    already_subscribed = True
-
-                    break
-
-            # =================================================
-            # STEP 3
-            # Already subscribed
-            # =================================================
-
-            if already_subscribed:
-
-                return {
-
-                    "ok": True,
-
-                    "already_subscribed":
-                        True,
-
-                    "verified":
-                        True,
-
-                    "message":
-                        "Anchorflow is already subscribed "
-                        "to this WABA.",
-
-                    "waba_id":
-                        payload.waba_id,
-
-                    "subscribed_apps":
-                        current_apps
-                }
-
-            # =================================================
-            # STEP 4
-            # Subscribe Anchorflow
-            # =================================================
-
-            subscribe_response = await client.post(
-                url,
-                headers=headers
-            )
-
-            try:
-
-                subscribe_data = (
-                    subscribe_response.json()
-                )
-
-            except Exception:
-
-                raise HTTPException(
-                    status_code=502,
-                    detail=
-                        "Meta returned an invalid "
-                        "subscription response."
-                )
-
-            if subscribe_response.status_code not in (
-                200,
-                201
-            ):
-
-                raise HTTPException(
-                    status_code=
-                        subscribe_response.status_code,
-
-                    detail={
-                        "message":
-                            "Meta rejected the WABA "
-                            "subscription request.",
-
-                        "waba_id":
-                            payload.waba_id,
-
-                        "meta_response":
-                            subscribe_data
-                    }
-                )
-
-            # =================================================
-            # STEP 5
-            # Verify subscription after POST
-            # =================================================
-
-            verify_response = await client.get(
-                url,
-                headers=headers
-            )
-
-            try:
-
-                verify_data = verify_response.json()
-
-            except Exception:
-
-                raise HTTPException(
-                    status_code=502,
-                    detail=
-                        "Meta returned an invalid "
-                        "verification response."
-                )
-
-            if verify_response.status_code != 200:
-
-                raise HTTPException(
-                    status_code=
-                        verify_response.status_code,
-
-                    detail={
-                        "message":
-                            "Subscription request succeeded, "
-                            "but verification failed.",
-
-                        "meta_response":
-                            verify_data
-                    }
-                )
-
-    except HTTPException:
-
-        raise
-
-    except Exception as exc:
-
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "message":
-                    "Failed to communicate with Meta.",
-
-                "error":
-                    str(exc)
-            }
-        )
-
-    # ============================================================
-    # FINAL VERIFICATION
-    # ============================================================
-
-    final_apps = verify_data.get(
-        "data",
-        []
-    )
-
-    verified = False
-
-    for app in final_apps:
-
-        app_data = app.get(
-            "whatsapp_business_api_data",
-            {}
-        )
-
-        if str(
-            app_data.get("id")
-        ) == str(app_id):
-
-            verified = True
-
-            break
 
     return {
 
         "ok":
-            verified,
-
-        "already_subscribed":
-            False,
-
-        "subscription_request":
-            subscribe_data,
-
-        "verified":
-            verified,
+            result["subscribed"],
 
         "waba_id":
             payload.waba_id,
 
+        "already_subscribed":
+            result["already_subscribed"],
+
+        "verified":
+            result["verified"],
+
+        "subscription_request":
+            result["subscription_request"],
+
         "subscribed_apps":
-            final_apps
+            result["subscribed_apps"]
     }
