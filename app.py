@@ -1512,3 +1512,116 @@ async def whatsapp_subscribe(
         "subscribed_apps":
             result["subscribed_apps"]
     }
+
+
+# ============================================================
+# SESSION 6
+# UNIFIED WHATSAPP ONBOARDING
+# ============================================================
+
+class WhatsAppOnboardingRequest(BaseModel):
+    waba_id: str
+    phone_number_id: str
+
+
+@app.post("/whatsapp/onboard")
+async def whatsapp_onboard(
+    payload: WhatsAppOnboardingRequest
+):
+    """
+    Unified onboarding operation.
+
+    Receives the WABA ID and phone number ID produced by
+    Embedded Signup, subscribes Anchorflow to the WABA,
+    verifies the subscription, and returns the onboarding state.
+
+    No access tokens are returned to the browser.
+    """
+
+    system_user_token = os.getenv(
+        "META_SYSTEM_USER_TOKEN"
+    )
+
+    graph_version = os.getenv(
+        "META_GRAPH_VERSION",
+        "v25.0"
+    )
+
+    app_id = os.getenv(
+        "META_APP_ID"
+    )
+
+    if not system_user_token:
+        raise HTTPException(
+            status_code=500,
+            detail="META_SYSTEM_USER_TOKEN is not configured."
+        )
+
+    if not app_id:
+        raise HTTPException(
+            status_code=500,
+            detail="META_APP_ID is not configured."
+        )
+
+    if not payload.waba_id:
+        raise HTTPException(
+            status_code=400,
+            detail="WABA ID is required."
+        )
+
+    if not payload.waba_id.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="WABA ID must contain only digits."
+        )
+
+    if not payload.phone_number_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Phone Number ID is required."
+        )
+
+    if not payload.phone_number_id.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="Phone Number ID must contain only digits."
+        )
+
+    # ------------------------------------------------------------
+    # STEP 1
+    # Subscribe Anchorflow to the WABA and verify it
+    # ------------------------------------------------------------
+
+    subscription = await subscribe_waba(
+        payload.waba_id,
+        system_user_token,
+        app_id,
+        graph_version
+    )
+
+    # ------------------------------------------------------------
+    # STEP 2
+    # Return clean onboarding result
+    # ------------------------------------------------------------
+
+    if not subscription["verified"]:
+        return {
+            "ok": False,
+            "onboarding_status": "SUBSCRIPTION_NOT_VERIFIED",
+            "waba_id": payload.waba_id,
+            "phone_number_id": payload.phone_number_id,
+            "subscription": subscription
+        }
+
+    return {
+        "ok": True,
+        "onboarding_status": "CONNECTED",
+        "message": "WhatsApp Business account connected successfully.",
+        "waba_id": payload.waba_id,
+        "phone_number_id": payload.phone_number_id,
+        "subscription": {
+            "subscribed": subscription["subscribed"],
+            "already_subscribed": subscription["already_subscribed"],
+            "verified": subscription["verified"]
+        }
+    }
