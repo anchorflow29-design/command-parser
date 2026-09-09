@@ -1793,3 +1793,99 @@ async def whatsapp_onboard(
             "verified": subscription["verified"]
         }
     }
+
+
+# ============================================================
+# SESSION 7C
+# CLIENT RESOLUTION BY PHONE NUMBER ID
+# ============================================================
+
+class WhatsAppClientResolutionRequest(BaseModel):
+    phone_number_id: str
+
+
+@app.post("/whatsapp/resolve-client")
+async def whatsapp_resolve_client(
+    payload: WhatsAppClientResolutionRequest
+):
+    """
+    Resolve an Anchorflow client from a WhatsApp Phone Number ID.
+
+    This endpoint is backend-only and uses the Supabase service-role
+    key. It does not expose the key or modify the existing onboarding
+    or Meta webhook/subscription logic.
+    """
+
+    if not payload.phone_number_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Phone Number ID is required."
+        )
+
+    if not payload.phone_number_id.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="Phone Number ID must contain only digits."
+        )
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+    if not supabase_url:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_URL is not configured."
+        )
+
+    if not supabase_key:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_SERVICE_ROLE_KEY is not configured."
+        )
+
+    clients_url = f"{supabase_url.rstrip('/')}/rest/v1/clients"
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(
+            clients_url,
+            headers=headers,
+            params={
+                "phone_number_id": f"eq.{payload.phone_number_id}",
+                "select": "client_id,business_name,waba_id,phone_number_id,connection_status",
+                "limit": "1"
+            }
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Supabase client resolution failed: {response.text}"
+        )
+
+    rows = response.json()
+
+    if not rows:
+        return {
+            "ok": False,
+            "client_found": False,
+            "phone_number_id": payload.phone_number_id,
+            "message": "No Anchorflow client is registered for this phone number."
+        }
+
+    record = rows[0]
+
+    return {
+        "ok": True,
+        "client_found": True,
+        "client_id": record["client_id"],
+        "business_name": record["business_name"],
+        "waba_id": record["waba_id"],
+        "phone_number_id": record["phone_number_id"],
+        "connection_status": record["connection_status"]
+    }
