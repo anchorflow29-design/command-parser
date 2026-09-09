@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import os
+import uuid
+from datetime import datetime, timezone
 import httpx
 
 
@@ -1515,6 +1517,155 @@ async def whatsapp_subscribe(
 
 
 # ============================================================
+# SESSION 7A
+# SUPABASE CLIENT REGISTRY
+# ============================================================
+
+async def upsert_client_mapping(
+    waba_id: str,
+    phone_number_id: str,
+    business_name: str | None = None
+):
+    """
+    Create or update the persistent Anchorflow client mapping.
+
+    Supabase is accessed only from the backend using the secret key.
+    The secret is never returned to the browser.
+    """
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+    if not supabase_url:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_URL is not configured."
+        )
+
+    if not supabase_key:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_SERVICE_ROLE_KEY is not configured."
+        )
+
+    base_url = supabase_url.rstrip("/")
+    clients_url = f"{base_url}/rest/v1/clients"
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+
+    # First try to find an existing client by WABA ID.
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(
+            clients_url,
+            headers=headers,
+            params={
+                "waba_id": f"eq.{waba_id}",
+                "select": "*",
+                "limit": "1"
+            }
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Supabase client lookup failed: {response.text}"
+            )
+
+        rows = response.json()
+
+        # If the WABA is not found, also check the phone number.
+        if not rows:
+            response = await client.get(
+                clients_url,
+                headers=headers,
+                params={
+                    "phone_number_id": f"eq.{phone_number_id}",
+                    "select": "*",
+                    "limit": "1"
+                }
+            )
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Supabase phone lookup failed: {response.text}"
+                )
+
+            rows = response.json()
+
+        # Existing client: update its current connection details.
+        if rows:
+            existing = rows[0]
+            client_id = existing["client_id"]
+
+            update_data = {
+                "waba_id": waba_id,
+                "phone_number_id": phone_number_id,
+                "connection_status": "CONNECTED",
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+
+            if business_name:
+                update_data["business_name"] = business_name
+
+            response = await client.patch(
+                clients_url,
+                headers={**headers, "Prefer": "return=representation"},
+                params={"client_id": f"eq.{client_id}"},
+                json=update_data
+            )
+
+            if response.status_code not in (200, 204):
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Supabase client update failed: {response.text}"
+                )
+
+            updated_rows = response.json() if response.status_code == 200 else []
+            record = updated_rows[0] if updated_rows else {**existing, **update_data}
+
+            return {
+                "client_id": client_id,
+                "created": False,
+                "record": record
+            }
+
+        # New client: generate an internal Anchorflow client ID.
+        client_id = f"client_{uuid.uuid4().hex[:12]}"
+
+        record = {
+            "client_id": client_id,
+            "business_name": business_name or "Unnamed Dealership",
+            "waba_id": waba_id,
+            "phone_number_id": phone_number_id,
+            "connection_status": "CONNECTED"
+        }
+
+        response = await client.post(
+            clients_url,
+            headers={**headers, "Prefer": "return=representation"},
+            json=record
+        )
+
+        if response.status_code not in (200, 201):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Supabase client creation failed: {response.text}"
+            )
+
+        created_rows = response.json()
+        return {
+            "client_id": client_id,
+            "created": True,
+            "record": created_rows[0] if created_rows else record
+        }
+
+
+# ============================================================
 # SESSION 6
 # UNIFIED WHATSAPP ONBOARDING
 # ============================================================
@@ -1522,6 +1673,7 @@ async def whatsapp_subscribe(
 class WhatsAppOnboardingRequest(BaseModel):
     waba_id: str
     phone_number_id: str
+    business_name: str | None = None
 
 
 @app.post("/whatsapp/onboard")
@@ -1601,7 +1753,7 @@ async def whatsapp_onboard(
 
     # ------------------------------------------------------------
     # STEP 2
-    # Return clean onboarding result
+    # Persist the WABA -> phone -> Anchorflow client mapping
     # ------------------------------------------------------------
 
     if not subscription["verified"]:
@@ -1613,10 +1765,26 @@ async def whatsapp_onboard(
             "subscription": subscription
         }
 
+    try:
+        client_mapping = await upsert_client_mapping(
+            payload.waba_id,
+            payload.phone_number_id,
+            payload.business_name
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to save client mapping: {str(exc)}"
+        )
+
     return {
         "ok": True,
         "onboarding_status": "CONNECTED",
         "message": "WhatsApp Business account connected successfully.",
+        "client_id": client_mapping["client_id"],
+        "client_created": client_mapping["created"],
         "waba_id": payload.waba_id,
         "phone_number_id": payload.phone_number_id,
         "subscription": {
