@@ -1682,6 +1682,355 @@ async def upsert_client_mapping(
         }
 
 
+
+# ============================================================
+# SESSION 7E
+# CLIENT WHATSAPP TOKEN STORAGE
+# ============================================================
+
+class WhatsAppTokenExchangeRequest(BaseModel):
+    code: str
+    client_id: str
+    waba_id: str
+    phone_number_id: str
+
+
+async def store_client_business_token(
+    client_id: str,
+    waba_id: str,
+    phone_number_id: str,
+    access_token: str,
+    token_type: str | None,
+    expires_at: str | None,
+    data_access_expires_at: str | None
+):
+    """
+    Store the Meta business access token server-side.
+
+    The token is never returned to the browser.
+    This table is accessed using the Supabase service-role key.
+    """
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+    if not supabase_url:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_URL is not configured."
+        )
+
+    if not supabase_key:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_SERVICE_ROLE_KEY is not configured."
+        )
+
+    clients_url = f"{supabase_url.rstrip('/')}/rest/v1/clients"
+    credentials_url = (
+        f"{supabase_url.rstrip('/')}/rest/v1/client_credentials"
+    )
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+
+    # Verify the supplied client mapping before storing a secret.
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(
+            clients_url,
+            headers=headers,
+            params={
+                "client_id": f"eq.{client_id}",
+                "waba_id": f"eq.{waba_id}",
+                "phone_number_id": f"eq.{phone_number_id}",
+                "select": "client_id",
+                "limit": "1"
+            }
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Supabase client verification failed: {response.text}"
+            )
+
+        rows = response.json()
+
+        if not rows:
+            raise HTTPException(
+                status_code=404,
+                detail="The supplied client_id does not match the WABA and phone number."
+            )
+
+        credential_record = {
+            "client_id": client_id,
+            "provider": "META_WHATSAPP",
+            "access_token": access_token,
+            "token_type": token_type,
+            "expires_at": expires_at,
+            "data_access_expires_at": data_access_expires_at,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        response = await client.post(
+            credentials_url,
+            headers={
+                **headers,
+                "Prefer": "resolution=merge-duplicates,return=representation"
+            },
+            params={"on_conflict": "client_id"},
+            json=credential_record
+        )
+
+        if response.status_code not in (200, 201):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Supabase credential storage failed: {response.text}"
+            )
+
+    return {
+        "stored": True,
+        "provider": "META_WHATSAPP",
+        "expires_at": expires_at,
+        "data_access_expires_at": data_access_expires_at
+    }
+
+
+@app.post("/whatsapp/token-exchange")
+async def whatsapp_token_exchange(
+    payload: WhatsAppTokenExchangeRequest
+):
+    """
+    Exchange the short-lived Embedded Signup authorization code for
+    the client's Meta business access token and store it server-side.
+
+    The access token is NEVER returned to the browser.
+    """
+
+    app_id = os.getenv("META_APP_ID")
+    app_secret = os.getenv("META_APP_SECRET")
+    graph_version = os.getenv(
+        "META_GRAPH_VERSION",
+        "v25.0"
+    )
+
+    if not app_id:
+        raise HTTPException(
+            status_code=500,
+            detail="META_APP_ID is not configured."
+        )
+
+    if not app_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="META_APP_SECRET is not configured."
+        )
+
+    if not payload.code:
+        raise HTTPException(
+            status_code=400,
+            detail="Authorization code is required."
+        )
+
+    for field_name, field_value in (
+        ("client_id", payload.client_id),
+        ("waba_id", payload.waba_id),
+        ("phone_number_id", payload.phone_number_id),
+    ):
+        if not field_value:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field_name} is required."
+            )
+
+    if not payload.waba_id.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="WABA ID must contain only digits."
+        )
+
+    if not payload.phone_number_id.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="Phone Number ID must contain only digits."
+        )
+
+    # ------------------------------------------------------------
+    # STEP 1
+    # Exchange short-lived authorization code server-to-server
+    # ------------------------------------------------------------
+
+    token_url = (
+        f"https://graph.facebook.com/"
+        f"{graph_version}/oauth/access_token"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            token_response = await client.get(
+                token_url,
+                params={
+                    "client_id": app_id,
+                    "client_secret": app_secret,
+                    "code": payload.code
+                }
+            )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Could not contact Meta during authorization exchange.",
+                "error": str(exc)
+            }
+        )
+
+    try:
+        token_data = token_response.json()
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Meta returned an invalid authorization response."
+        )
+
+    if token_response.status_code != 200:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Meta rejected the Embedded Signup authorization code.",
+                "meta_response": token_data
+            }
+        )
+
+    business_token = token_data.get("access_token")
+
+    if not business_token:
+        raise HTTPException(
+            status_code=502,
+            detail="Meta did not return an access token."
+        )
+
+    # ------------------------------------------------------------
+    # STEP 2
+    # Debug token metadata without returning the token
+    # ------------------------------------------------------------
+
+    debug_url = (
+        f"https://graph.facebook.com/"
+        f"{graph_version}/debug_token"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            debug_response = await client.get(
+                debug_url,
+                params={
+                    "input_token": business_token,
+                    "access_token": f"{app_id}|{app_secret}"
+                }
+            )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Could not contact Meta while validating the new token.",
+                "error": str(exc)
+            }
+        )
+
+    try:
+        debug_data = debug_response.json()
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Meta returned an invalid token-debug response."
+        )
+
+    if debug_response.status_code != 200:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Meta rejected the returned business access token during validation.",
+                "meta_response": debug_data
+            }
+        )
+
+    token_info = debug_data.get("data", {})
+
+    if token_info.get("is_valid") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Meta returned an invalid business access token.",
+                "token_info": {
+                    "is_valid": token_info.get("is_valid"),
+                    "app_id": token_info.get("app_id"),
+                    "user_id": token_info.get("user_id"),
+                    "scopes": token_info.get("scopes", []),
+                    "expires_at": token_info.get("expires_at"),
+                    "data_access_expiration_time": token_info.get(
+                        "data_access_expiration_time"
+                    )
+                }
+            }
+        )
+
+    expires_at = token_info.get("expires_at")
+    data_access_expires_at = token_info.get(
+        "data_access_expiration_time"
+    )
+    token_type = token_data.get("token_type")
+
+    # ------------------------------------------------------------
+    # STEP 3
+    # Store the secret against the verified Anchorflow client
+    # ------------------------------------------------------------
+
+    stored = await store_client_business_token(
+        client_id=payload.client_id,
+        waba_id=payload.waba_id,
+        phone_number_id=payload.phone_number_id,
+        access_token=business_token,
+        token_type=token_type,
+        expires_at=(
+            str(expires_at)
+            if expires_at is not None
+            else None
+        ),
+        data_access_expires_at=(
+            str(data_access_expires_at)
+            if data_access_expires_at is not None
+            else None
+        )
+    )
+
+    return {
+        "ok": True,
+        "token_status": "STORED",
+        "client_id": payload.client_id,
+        "waba_id": payload.waba_id,
+        "phone_number_id": payload.phone_number_id,
+        "token_type": token_type,
+        "expires_at": (
+            str(expires_at)
+            if expires_at is not None
+            else None
+        ),
+        "data_access_expires_at": (
+            str(data_access_expires_at)
+            if data_access_expires_at is not None
+            else None
+        ),
+        "message": (
+            "Meta business access token exchanged and stored securely "
+            "on the Anchorflow backend."
+        )
+    }
+
+
 # ============================================================
 # SESSION 6
 # UNIFIED WHATSAPP ONBOARDING
@@ -1704,7 +2053,8 @@ async def whatsapp_onboard(
     Embedded Signup, subscribes Anchorflow to the WABA,
     verifies the subscription, and returns the onboarding state.
 
-    No access tokens are returned to the browser.
+    No access tokens are returned to the browser. The Embedded Signup
+    authorization code is exchanged separately by /whatsapp/token-exchange.
     """
 
     system_user_token = os.getenv(
