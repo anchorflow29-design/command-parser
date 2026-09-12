@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 import uuid
@@ -80,6 +81,22 @@ def handle(user_input: str) -> dict:
 # ============================================================
 
 app = FastAPI()
+
+# ============================================================
+# CORS
+# Allow the public Anchorflow onboarding page on GitHub Pages
+# to call the backend onboarding endpoints from the browser.
+# ============================================================
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://anchorflow29-design.github.io"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ============================================================
