@@ -2062,6 +2062,429 @@ async def store_client_business_token(
     }
 
 
+
+# ============================================================
+# SESSION 9A
+# CLIENT WABA + PHONE CONNECTION CHECK
+# ============================================================
+
+class ClientConnectionCheckRequest(BaseModel):
+    client_id: str
+
+
+@app.post("/whatsapp/client-connection-check")
+async def whatsapp_client_connection_check(
+    payload: ClientConnectionCheckRequest
+):
+    """
+    Verify that a stored client Meta token is valid and can access
+    the exact WABA and phone number registered for that client.
+
+    The access token is retrieved and used only server-side.
+    It is NEVER returned to the browser.
+    """
+
+    app_id = os.getenv("META_APP_ID")
+    app_secret = os.getenv("META_APP_SECRET")
+    graph_version = os.getenv(
+        "META_GRAPH_VERSION",
+        "v25.0"
+    )
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+    if not app_id:
+        raise HTTPException(
+            status_code=500,
+            detail="META_APP_ID is not configured."
+        )
+
+    if not app_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="META_APP_SECRET is not configured."
+        )
+
+    if not supabase_url:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_URL is not configured."
+        )
+
+    if not supabase_key:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_SERVICE_ROLE_KEY is not configured."
+        )
+
+    if not payload.client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="client_id is required."
+        )
+
+    base_url = supabase_url.rstrip("/")
+    clients_url = f"{base_url}/rest/v1/clients"
+    credentials_url = f"{base_url}/rest/v1/client_credentials"
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+
+        # --------------------------------------------------------
+        # STEP 1 - Retrieve client mapping
+        # --------------------------------------------------------
+
+        client_response = await client.get(
+            clients_url,
+            headers=headers,
+            params={
+                "client_id": f"eq.{payload.client_id}",
+                "select": (
+                    "client_id,business_name,waba_id,"
+                    "phone_number_id,connection_status"
+                ),
+                "limit": "1"
+            }
+        )
+
+        if client_response.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "Supabase client lookup failed.",
+                    "error": client_response.text
+                }
+            )
+
+        client_rows = client_response.json()
+
+        if not client_rows:
+            return {
+                "ok": False,
+                "client_id": payload.client_id,
+                "connection_status": "CLIENT_NOT_FOUND",
+                "message":
+                    "No Anchorflow client is registered for this client_id."
+            }
+
+        client_record = client_rows[0]
+
+        waba_id = client_record.get("waba_id")
+        phone_number_id = client_record.get("phone_number_id")
+
+        if not waba_id or not phone_number_id:
+            return {
+                "ok": False,
+                "client_id": payload.client_id,
+                "connection_status": "INCOMPLETE_CLIENT_MAPPING",
+                "message":
+                    "The client does not have a complete WABA "
+                    "and phone number mapping."
+            }
+
+        # --------------------------------------------------------
+        # STEP 2 - Retrieve stored token
+        # --------------------------------------------------------
+
+        credential_response = await client.get(
+            credentials_url,
+            headers=headers,
+            params={
+                "client_id": f"eq.{payload.client_id}",
+                "select": (
+                    "client_id,provider,access_token,token_type,"
+                    "expires_at,data_access_expires_at,updated_at"
+                ),
+                "limit": "1"
+            }
+        )
+
+        if credential_response.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "Supabase credential lookup failed.",
+                    "error": credential_response.text
+                }
+            )
+
+        credential_rows = credential_response.json()
+
+        if not credential_rows:
+            return {
+                "ok": False,
+                "client_id": payload.client_id,
+                "connection_status": "CREDENTIAL_NOT_FOUND",
+                "message":
+                    "No stored Meta credential exists for this client."
+            }
+
+        credential = credential_rows[0]
+        access_token = credential.get("access_token")
+
+        if not access_token:
+            return {
+                "ok": False,
+                "client_id": payload.client_id,
+                "connection_status": "TOKEN_MISSING",
+                "message":
+                    "The client credential exists but contains no access token."
+            }
+
+        # --------------------------------------------------------
+        # STEP 3 - Validate token
+        # --------------------------------------------------------
+
+        debug_url = (
+            f"https://graph.facebook.com/"
+            f"{graph_version}/debug_token"
+        )
+
+        try:
+            debug_response = await client.get(
+                debug_url,
+                params={
+                    "input_token": access_token,
+                    "access_token": f"{app_id}|{app_secret}"
+                }
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message":
+                        "Could not contact Meta while validating "
+                        "the stored client token.",
+                    "error": str(exc)
+                }
+            )
+
+        try:
+            debug_data = debug_response.json()
+        except Exception:
+            raise HTTPException(
+                status_code=502,
+                detail="Meta returned an invalid token-debug response."
+            )
+
+        if debug_response.status_code != 200:
+            return {
+                "ok": False,
+                "client_id": payload.client_id,
+                "token_status": "INVALID",
+                "connection_status": "TOKEN_INVALID",
+                "message":
+                    "Meta rejected the stored client access token.",
+                "meta_error": debug_data
+            }
+
+        token_info = debug_data.get("data", {})
+
+        if token_info.get("is_valid") is not True:
+            return {
+                "ok": False,
+                "client_id": payload.client_id,
+                "token_status": "INVALID",
+                "connection_status": "TOKEN_INVALID",
+                "token": {
+                    "is_valid": token_info.get("is_valid"),
+                    "app_id": token_info.get("app_id"),
+                    "scopes": token_info.get("scopes", []),
+                    "expires_at": token_info.get("expires_at"),
+                    "data_access_expiration_time":
+                        token_info.get("data_access_expiration_time")
+                },
+                "message":
+                    "The stored client access token is not valid."
+            }
+
+        token_app_id = str(token_info.get("app_id", ""))
+
+        if token_app_id != str(app_id):
+            return {
+                "ok": False,
+                "client_id": payload.client_id,
+                "token_status": "VALID",
+                "connection_status": "WRONG_APP",
+                "message":
+                    "The stored token is valid, but it does not "
+                    "belong to the configured Anchorflow app.",
+                "token_app_id": token_app_id
+            }
+
+        # --------------------------------------------------------
+        # STEP 4 - Verify WABA access
+        # --------------------------------------------------------
+
+        waba_url = (
+            f"https://graph.facebook.com/"
+            f"{graph_version}/{waba_id}"
+        )
+
+        try:
+            waba_response = await client.get(
+                waba_url,
+                params={
+                    "fields": "id,name,currency,timezone_id"
+                },
+                headers={
+                    "Authorization": f"Bearer {access_token}"
+                }
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message":
+                        "Could not contact Meta while checking WABA access.",
+                    "error": str(exc)
+                }
+            )
+
+        try:
+            waba_data = waba_response.json()
+        except Exception:
+            raise HTTPException(
+                status_code=502,
+                detail="Meta returned an invalid WABA response."
+            )
+
+        if waba_response.status_code != 200:
+            return {
+                "ok": False,
+                "client_id": payload.client_id,
+                "token_status": "VALID",
+                "waba_status": "INACCESSIBLE",
+                "phone_status": "NOT_CHECKED",
+                "connection_status": "WABA_INACCESSIBLE",
+                "waba_id": waba_id,
+                "message":
+                    "The token is valid, but the client WABA "
+                    "could not be accessed.",
+                "meta_error": waba_data
+            }
+
+        if str(waba_data.get("id", "")) != str(waba_id):
+            return {
+                "ok": False,
+                "client_id": payload.client_id,
+                "token_status": "VALID",
+                "waba_status": "MISMATCH",
+                "phone_status": "NOT_CHECKED",
+                "connection_status": "WABA_MISMATCH",
+                "waba_id": waba_id,
+                "message":
+                    "Meta returned a different WABA ID than "
+                    "the one registered for this client."
+            }
+
+        # --------------------------------------------------------
+        # STEP 5 - Verify exact phone number
+        # --------------------------------------------------------
+
+        phones_url = (
+            f"https://graph.facebook.com/"
+            f"{graph_version}/{waba_id}/phone_numbers"
+        )
+
+        try:
+            phones_response = await client.get(
+                phones_url,
+                headers={
+                    "Authorization": f"Bearer {access_token}"
+                }
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message":
+                        "Could not contact Meta while checking "
+                        "client phone numbers.",
+                    "error": str(exc)
+                }
+            )
+
+        try:
+            phones_data = phones_response.json()
+        except Exception:
+            raise HTTPException(
+                status_code=502,
+                detail="Meta returned an invalid phone-number response."
+            )
+
+        if phones_response.status_code != 200:
+            return {
+                "ok": False,
+                "client_id": payload.client_id,
+                "token_status": "VALID",
+                "waba_status": "ACCESSIBLE",
+                "phone_status": "INACCESSIBLE",
+                "connection_status": "PHONE_LIST_INACCESSIBLE",
+                "waba_id": waba_id,
+                "phone_number_id": phone_number_id,
+                "message":
+                    "The WABA is accessible, but Meta did not "
+                    "allow Anchorflow to retrieve its phone numbers.",
+                "meta_error": phones_data
+            }
+
+        phone_numbers = phones_data.get("data", [])
+
+        phone_found = any(
+            str(phone.get("id")) == str(phone_number_id)
+            for phone in phone_numbers
+        )
+
+        if not phone_found:
+            return {
+                "ok": False,
+                "client_id": payload.client_id,
+                "token_status": "VALID",
+                "waba_status": "ACCESSIBLE",
+                "phone_status": "NOT_FOUND",
+                "connection_status": "PHONE_MISMATCH",
+                "waba_id": waba_id,
+                "phone_number_id": phone_number_id,
+                "phone_numbers_found": len(phone_numbers),
+                "message":
+                    "The WABA is accessible, but the registered "
+                    "phone number was not found in that WABA."
+            }
+
+        # --------------------------------------------------------
+        # STEP 6 - Everything matches
+        # --------------------------------------------------------
+
+        return {
+            "ok": True,
+            "client_id": payload.client_id,
+            "business_name": client_record.get("business_name"),
+            "token_status": "VALID",
+            "waba_status": "ACCESSIBLE",
+            "phone_status": "ACCESSIBLE",
+            "connection_status": "CONNECTED",
+            "waba": {
+                "waba_id": waba_id,
+                "name": waba_data.get("name"),
+                "currency": waba_data.get("currency"),
+                "timezone_id": waba_data.get("timezone_id")
+            },
+            "phone_number": {
+                "phone_number_id": phone_number_id
+            },
+            "message":
+                "The stored Meta token can access the registered "
+                "WABA and phone number for this Anchorflow client."
+        }
+
+
 @app.post("/whatsapp/token-exchange")
 async def whatsapp_token_exchange(
     payload: WhatsAppTokenExchangeRequest
