@@ -1857,8 +1857,7 @@ async def whatsapp_client_token_status(
 
         raise HTTPException(
             status_code=502,
-            detail:
-                "Meta returned an invalid token-debug response."
+            detail="Meta returned an invalid token-debug response."
         )
 
     # ------------------------------------------------------------
