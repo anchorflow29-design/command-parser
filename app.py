@@ -1684,6 +1684,270 @@ async def upsert_client_mapping(
 
 
 # ============================================================
+# SESSION 9A
+# STORED CLIENT TOKEN VALIDATION
+# ============================================================
+
+class ClientTokenStatusRequest(BaseModel):
+    client_id: str
+
+
+@app.post("/whatsapp/client-token-status")
+async def whatsapp_client_token_status(
+    payload: ClientTokenStatusRequest
+):
+    """
+    Validate a previously stored client Meta business access token.
+
+    The client_id is supplied by the caller.
+    The actual access token is retrieved server-side from Supabase.
+
+    The access token is NEVER returned to the browser.
+    """
+
+    app_id = os.getenv("META_APP_ID")
+    app_secret = os.getenv("META_APP_SECRET")
+    graph_version = os.getenv(
+        "META_GRAPH_VERSION",
+        "v25.0"
+    )
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+    if not app_id:
+        raise HTTPException(
+            status_code=500,
+            detail="META_APP_ID is not configured."
+        )
+
+    if not app_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="META_APP_SECRET is not configured."
+        )
+
+    if not supabase_url:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_URL is not configured."
+        )
+
+    if not supabase_key:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_SERVICE_ROLE_KEY is not configured."
+        )
+
+    if not payload.client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="client_id is required."
+        )
+
+    # ------------------------------------------------------------
+    # STEP 1
+    # Retrieve the client credential server-side
+    # ------------------------------------------------------------
+
+    credentials_url = (
+        f"{supabase_url.rstrip('/')}/rest/v1/"
+        f"client_credentials"
+    )
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+
+        credential_response = await client.get(
+            credentials_url,
+            headers=headers,
+            params={
+                "client_id": f"eq.{payload.client_id}",
+                "select": (
+                    "client_id,provider,access_token,"
+                    "token_type,expires_at,"
+                    "data_access_expires_at,"
+                    "updated_at"
+                ),
+                "limit": "1"
+            }
+        )
+
+    if credential_response.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message":
+                    "Supabase credential lookup failed.",
+                "error":
+                    credential_response.text
+            }
+        )
+
+    credential_rows = credential_response.json()
+
+    if not credential_rows:
+        return {
+            "ok": False,
+            "client_id": payload.client_id,
+            "token_status": "NOT_FOUND",
+            "message":
+                "No stored Meta credential exists for this client."
+        }
+
+    credential = credential_rows[0]
+
+    access_token = credential.get("access_token")
+
+    if not access_token:
+        return {
+            "ok": False,
+            "client_id": payload.client_id,
+            "token_status": "MISSING",
+            "message":
+                "The client credential exists but contains no access token."
+        }
+
+    # ------------------------------------------------------------
+    # STEP 2
+    # Debug the stored token with Meta
+    # ------------------------------------------------------------
+
+    debug_url = (
+        f"https://graph.facebook.com/"
+        f"{graph_version}/debug_token"
+    )
+
+    try:
+
+        async with httpx.AsyncClient(
+            timeout=30.0
+        ) as client:
+
+            debug_response = await client.get(
+                debug_url,
+                params={
+                    "input_token": access_token,
+                    "access_token":
+                        f"{app_id}|{app_secret}"
+                }
+            )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message":
+                    "Could not contact Meta while validating the stored client token.",
+                "error":
+                    str(exc)
+            }
+        )
+
+    try:
+        debug_data = debug_response.json()
+
+    except Exception:
+
+        raise HTTPException(
+            status_code=502,
+            detail:
+                "Meta returned an invalid token-debug response."
+        )
+
+    # ------------------------------------------------------------
+    # STEP 3
+    # Handle invalid/revoked token
+    # ------------------------------------------------------------
+
+    if debug_response.status_code != 200:
+
+        return {
+            "ok": False,
+            "client_id": payload.client_id,
+            "token_status": "INVALID",
+            "message":
+                "Meta rejected the stored client access token.",
+            "meta_error": debug_data
+        }
+
+    token_info = debug_data.get(
+        "data",
+        {}
+    )
+
+    is_valid = token_info.get(
+        "is_valid"
+    )
+
+    if is_valid is not True:
+
+        return {
+            "ok": False,
+            "client_id": payload.client_id,
+            "token_status": "INVALID",
+            "token": {
+                "is_valid": is_valid,
+                "app_id":
+                    token_info.get("app_id"),
+                "user_id":
+                    token_info.get("user_id"),
+                "scopes":
+                    token_info.get("scopes", []),
+                "expires_at":
+                    token_info.get("expires_at"),
+                "data_access_expiration_time":
+                    token_info.get(
+                        "data_access_expiration_time"
+                    )
+            }
+        }
+
+    # ------------------------------------------------------------
+    # STEP 4
+    # Return SAFE metadata only
+    # ------------------------------------------------------------
+
+    return {
+        "ok": True,
+        "client_id": payload.client_id,
+        "token_status": "VALID",
+        "token": {
+            "is_valid":
+                token_info.get("is_valid"),
+            "app_id":
+                token_info.get("app_id"),
+            "user_id":
+                token_info.get("user_id"),
+            "scopes":
+                token_info.get("scopes", []),
+            "expires_at":
+                token_info.get("expires_at"),
+            "data_access_expiration_time":
+                token_info.get(
+                    "data_access_expiration_time"
+                )
+        },
+        "stored_credential": {
+            "provider":
+                credential.get("provider"),
+            "token_type":
+                credential.get("token_type"),
+            "updated_at":
+                credential.get("updated_at")
+        },
+        "message":
+            "Stored Meta client access token is valid."
+    }
+
+
+# ============================================================
 # SESSION 7E
 # CLIENT WHATSAPP TOKEN STORAGE
 # ============================================================
